@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Bulk Goods
+## Notes: Shift-click a vendor item to buy more than one stack in one go, in Blizzard's own quantity window.
+## Author: rambomst
+## Version: @project-version@
+## IconTexture: Interface\Icons\INV_Misc_Bag_08
+
+BulkGoods.lua

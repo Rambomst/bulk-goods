@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2d6b47"/>
+      <stop offset="1" stop-color="#0b2416"/>
+    </linearGradient>
+    <linearGradient id="wood" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffdb8c"/>
+      <stop offset="0.55" stop-color="#f2b24c"/>
+      <stop offset="1" stop-color="#cc8224"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d8913a"/>
+      <stop offset="1" stop-color="#a5601b"/>
+    </linearGradient>
+    <clipPath id="inside">
+      <rect x="26" y="26" width="80" height="80"/>
+    </clipPath>
+    <!-- one crate, 132 square: a frame, a recessed panel and a diagonal brace -->
+    <g id="crate" stroke="#0c1020" stroke-linejoin="round">
+      <rect x="0" y="0" width="132" height="132" rx="14" fill="url(#wood)" stroke-width="12"/>
+      <rect x="26" y="26" width="80" height="80" fill="url(#panel)" stroke="none"/>
+      <g clip-path="url(#inside)">
+        <path d="M10 122 L122 10" stroke-width="34"/>
+        <path d="M10 122 L122 10" stroke="#f2b24c" stroke-width="16"/>
+      </g>
+      <rect x="26" y="26" width="80" height="80" fill="none" stroke-width="9"/>
+    </g>
+  </defs>
+  <rect width="400" height="400" rx="72" fill="url(#bg)"/>
+  <use xlink:href="#crate" x="64" y="204"/>
+  <use xlink:href="#crate" x="204" y="204"/>
+  <use xlink:href="#crate" x="134" y="64"/>
+</svg>

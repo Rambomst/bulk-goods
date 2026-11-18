@@ -4,6 +4,7 @@
 ## Author: rambomst
 ## Version: @project-version@
 ## IconTexture: Interface\Icons\INV_Misc_Bag_08
+## X-Curse-Project-ID: 1814339
 ## X-Wago-ID: x61xEAN1
 
 BulkGoods.lua

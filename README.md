@@ -22,8 +22,9 @@ not alongside one: they change the same window.
 
 ## Install
 
-Install it from [Wago Addons](https://addons.wago.io/addons/bulk-goods), by hand or with an addon manager, or
-extract the zip from the newest [release](https://github.com/Rambomst/bulk-goods/releases) into
+Install it from [CurseForge](https://www.curseforge.com/wow/addons/bulk-goods) or
+[Wago Addons](https://addons.wago.io/addons/bulk-goods), by hand or with an addon manager, or extract the zip from
+the newest [release](https://github.com/Rambomst/bulk-goods/releases) into
 `World of Warcraft/_forever_/Interface/AddOns`.
 
 ## Bugs and ideas

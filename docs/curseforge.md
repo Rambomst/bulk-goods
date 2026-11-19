@@ -9,10 +9,13 @@ Shift-click a vendor item to buy more than one stack in one go, in Blizzard's ow
 ## Description
 
 Shift-clicking a vendor item opens Blizzard's quantity window, but it stops at one stack: 30 Hot Spices take two
-trips through it. **Bulk Goods** lifts that limit and leaves the window as it is. Shift-click, type 30, Okay, and
-all 30 arrive.
+trips through it. **Bulk Goods** lifts that limit in the same window. Shift-click, type 30, Okay, and all 30
+arrive.
 
 - **As many as you can buy:** the window goes up to what your gold, your bag space and the vendor's stock allow.
+- **The number you type is how many you get:** for an item the vendor sells several at a time (Mild Spices come
+  five for a price), it is rounded up to whole bundles. Blizzard's window counts the bundles instead, so typing 80
+  there would buy 400.
 - **A stack at a time:** the vendor still sells one stack per purchase, so Bulk Goods buys the stacks one after
   another, each once the last one is in your bags.
 - **A chat line if it stops early:** full bags, not enough gold, the item sold out or the vendor window closed, with

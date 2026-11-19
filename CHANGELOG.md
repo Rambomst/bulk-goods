@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.0.1
+
+- For an item the vendor sells several at a time (Mild Spices come five for a price), the number you type is now
+  how many you get, rounded up to whole bundles. Blizzard's window counts the bundles, so typing 80 bought 400.
+  Backspace and the arrows work on that total too.
+- A leading 0 no longer counts as a 1: typing 050 bought 150.
+- The most the window offers no longer comes out one bundle short when your gold exactly covers it.
+
 ## v1.0.0
 
 First release.

@@ -92,6 +92,8 @@ local function open(opts)
 	-- MerchantFrame_OnShow opens every bag before it fills the vendor's items. Bag windows are not under test.
 	sim.G.OpenAllBags = function() end
 	sim.G.CloseAllBags = function() end
+	-- A client native the sim does not define: the prompt runs a key's binding when the key comes up.
+	sim.G.RunBinding = function() end
 	sim:openMerchant()
 	vendor:tick(0.1)
 	return s
@@ -119,6 +121,19 @@ function Session:type(text)
 	for ch in text:gmatch(".") do
 		self.sim:input(function()
 			self.sim.widgets.dispatch(frame, "OnChar", ch)
+		end)
+	end
+end
+
+-- Presses a key in the quantity prompt. It comes up in the prompt unless the press closed it, as with Enter.
+function Session:key(key)
+	local frame = self:prompt()
+	self.sim:input(function()
+		self.sim.widgets.dispatch(frame, "OnKeyDown", key)
+	end)
+	if frame:IsShown() then
+		self.sim:input(function()
+			self.sim.widgets.dispatch(frame, "OnKeyUp", key)
 		end)
 	end
 end
@@ -324,14 +339,131 @@ test("an item sold five at a time is bought in whole fives", function()
 	eq(p.minSplit, 5, "step")
 	eq(p.isMultiStack, true, "bundle layout")
 	eq(p.maxStack % 5, 0, "ceiling in whole bundles")
-	-- One keypress is a number of bundles: 7 bundles of 5.
-	s:type("7")
+	s:type("35")
 	eq(p.split, 35, "typed amount")
+	eq(p.StackItemCountText:GetText(), "35 Total", "total shown")
 	s:okay()
 	s.vendor:tick(2)
 	eq(s.vendor:quantities(), "20,15", "calls")
 	eq(s.vendor:count(90001), 35, "in the bags")
 	eq(s.sim.world.player.money, 10 * GOLD - 350, "money")
+	clean(s)
+end)
+
+-- Blizzard's prompt reads the digits as a number of fives: 80 typed was 400 with room for 400, and 40 without (its
+-- 0 dropped, "8 Stacks, 40 Total").
+test("80 typed for an item sold five at a time buys 80", function()
+	for _, free in ipairs({ 22, 16 }) do
+		local s = open({ spec = { bags = bags(free) } })
+		s:shiftClick(BUNDLE)
+		local p = s:prompt()
+		eq(p.maxStack, free * 20, "ceiling")
+		s:type("80")
+		eq(p.split, 80, "typed amount")
+		eq(p.StackItemCountText:GetText(), "80 Total", "total shown")
+		s:okay()
+		s.vendor:tick(2)
+		eq(s.vendor:quantities(), "20,20,20,20", "calls")
+		eq(s.vendor:count(90001), 80, "in the bags")
+		clean(s)
+	end
+end)
+
+test("a total between whole fives is rounded up to the next five", function()
+	local s = open()
+	s:shiftClick(BUNDLE)
+	local p = s:prompt()
+	s:type("8")
+	eq(p.split, 10, "8 typed")
+	s:type("3")
+	eq(p.split, 85, "83 typed")
+	eq(p.StackItemCountText:GetText(), "85 Total", "total shown")
+	clean(s)
+end)
+
+test("a digit that takes the total past the ceiling is dropped", function()
+	local s = open({ spec = { bags = bags(3) } })
+	s:shiftClick(BUNDLE)
+	local p = s:prompt()
+	eq(p.maxStack, 60, "ceiling")
+	s:type("80")
+	eq(p.split, 10, "80 typed")
+	ok(p.RightButton:IsEnabled(), "up arrow")
+	s:key("BACKSPACE")
+	s:type("58")
+	eq(p.split, 60, "58 typed")
+	ok(not p.RightButton:IsEnabled(), "up arrow at the ceiling")
+	clean(s)
+end)
+
+test("Backspace takes the last digit typed off the total", function()
+	local s = open()
+	s:shiftClick(BUNDLE)
+	local p = s:prompt()
+	s:type("123")
+	eq(p.split, 125, "123 typed")
+	s:key("BACKSPACE")
+	eq(p.split, 15, "12 left")
+	eq(p.StackItemCountText:GetText(), "15 Total", "total shown")
+	s:key("BACKSPACE")
+	eq(p.split, 5, "1 left")
+	s:key("BACKSPACE")
+	eq(p.split, 5, "nothing left")
+	ok(not p.LeftButton:IsEnabled(), "down arrow at one five")
+	s:type("4")
+	eq(p.split, 5, "typing starts again")
+	clean(s)
+end)
+
+test("the arrows step a five, and digits typed after them go on from there", function()
+	local s = open()
+	s:shiftClick(BUNDLE)
+	local p = s:prompt()
+	s.sim:click(p.RightButton)
+	eq(p.split, 10, "up arrow")
+	-- Before any digit, as in Blizzard's prompt, the first one starts the total.
+	s:type("2")
+	eq(p.split, 5, "2 typed")
+	s.sim:click(p.RightButton)
+	eq(p.split, 10, "up arrow again")
+	s:type("0")
+	eq(p.split, 100, "0 typed after it")
+	s:key("LEFT")
+	eq(p.split, 95, "left arrow key")
+	s:key("BACKSPACE")
+	eq(p.split, 10, "Backspace after it")
+	s:okay()
+	s.vendor:tick(1)
+	eq(s.vendor:quantities(), "10", "calls")
+	clean(s)
+end)
+
+-- Blizzard's prompt turns a leading 0 into a 1: 050 is 150.
+test("a leading 0 typed is not a 1", function()
+	local s = open()
+	s:shiftClick(SPICES)
+	s:type("050")
+	eq(s:prompt().split, 50, "050 typed")
+	clean(s)
+end)
+
+test("an item sold five at a time with room for one stack keeps Blizzard's prompt", function()
+	local s = open({ spec = { bags = bags(1) } })
+	s:shiftClick(BUNDLE)
+	local p = s:prompt()
+	eq(p.maxStack, 20, "Blizzard's ceiling")
+	s:type("3")
+	eq(p.split, 15, "Blizzard's count of fives")
+	clean(s)
+end)
+
+test("the ceiling for an item sold five at a time is every five the money covers", function()
+	-- 11 copper for five, and 66 copper: six fives. Blizzard's sum makes it five.
+	local list = items()
+	list[BUNDLE].price = 11
+	local s = open({ spec = { items = list, money = 66 } })
+	s:shiftClick(BUNDLE)
+	eq(s:prompt().maxStack, 30, "ceiling")
 	clean(s)
 end)
 
@@ -486,9 +618,7 @@ test("a bulk buy confirmed with Enter blocks nothing when the prompt is used aga
 	end
 	s:shiftClick(SPICES)
 	s:type("30")
-	s.sim:input(function()
-		s.sim.widgets.dispatch(s:prompt(), "OnKeyDown", "ENTER")
-	end)
+	s:key("ENTER")
 	s.vendor:tick(2)
 	eq(s.vendor:quantities(), "20,10", "calls")
 	-- Blizzard's own prompt again (a currency-priced item), closed with Cancel.

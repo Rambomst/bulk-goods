@@ -4,10 +4,12 @@ Shift-click a vendor item to buy more than one stack in one go, in Blizzard's ow
 Warcraft: Forever.
 
 Shift-clicking a vendor item opens Blizzard's quantity window, but it stops at one stack, so 30 Hot Spices take two
-trips through it. Bulk Goods lifts that limit and changes nothing else: Shift-click, type 30, Okay, and all 30
-arrive.
+trips through it. Bulk Goods lifts that limit in the same window: Shift-click, type 30, Okay, and all 30 arrive.
 
 - **As many as you can buy:** the window goes up to what your gold, your bag space and the vendor's stock allow.
+- **The number you type is how many you get:** for an item the vendor sells several at a time (Mild Spices come
+  five for a price), it is rounded up to whole bundles. Blizzard's window counts the bundles instead, so typing 80
+  there would buy 400.
 - **A stack at a time:** the vendor still sells one stack per purchase, so Bulk Goods buys the stacks one after
   another, each once the last one is in your bags.
 - **A chat line if it stops early:** full bags, not enough gold, the item sold out or the vendor window closed, with
@@ -44,6 +46,8 @@ Everything the addon runs is in `BulkGoods.lua`:
 - **How much can be bought** (`Plan`, `BagRoom`): the most the gold, the bags and the vendor's stock allow. Bag room
   counts the free slots of every bag that takes the item, plus the room left on its partial stacks. Items sold
   several at a time (five for a price) are bought in whole bundles.
+- **The amount typed into a raised window** (`OnChar`, `OnKeyDown`, `OnArrowClick`): the digits typed are the total,
+  rounded up to whole bundles, and Backspace and the arrows work on it.
 - **Buying, one stack per call** (`Buy`, `Send`, `Check`, `Finish`): a queue of purchases. The next
   `BuyMerchantItem` call goes once the item count in the bags has risen by the last one. The buying stops on the
   vendor's errors (`UI_ERROR_MESSAGE`), when the vendor window closes, when the vendor's list moves under it (limited
@@ -58,13 +62,18 @@ The rules it is built on:
   its `owner` field, and every later use of the window (bags, bank, vendor) would run tainted for the session.
 - The window's Okay hands the amount to the vendor button's `SplitStack`. Bulk Goods wraps that function on a button
   the first time it raises a window on it; one stack or less still goes to Blizzard's.
+- Blizzard's window reads the digits typed for an item sold several at a time as a count of bundles ("8 Stacks, 40
+  Total"), and a leading 0 as a 1. Under its own one-stack ceiling that costs a stack at most. The first time Bulk
+  Goods raises a window, it hooks the window's `OnChar` and `OnKeyDown` and its arrows' `OnClick` with `HookScript`,
+  so Blizzard's handlers still run first and untouched, and while a window is raised it puts the amount right after
+  each key.
 - With the gamepad interface on, the window's own handlers run gamepad code, which a raised window would taint, and
   the next protected gamepad call would be blocked. So Bulk Goods leaves the window alone there.
-- One known leftover: after a raised window is confirmed with Enter or used with the arrow keys, Blizzard's record
-  of the held key is written by tainted code (the window hides before the key comes up). The next close of any
-  quantity window runs that key's release binding tainted, which does no harm with mouse and keyboard. With the
-  gamepad interface turned on later in the same session, that close would run gamepad code tainted; `/reload`
-  clears it.
+- One known leftover: after Enter, Backspace or an arrow key in a raised window, Blizzard's record of held keys is
+  left written by tainted code, so the next close of any quantity window runs tainted. With Enter, which closes the
+  window before the key comes up, that close also runs Enter's release binding. None of it does harm with mouse and
+  keyboard. With the gamepad interface turned on later in the same session, that close would run gamepad code
+  tainted; `/reload` clears it.
 
 Lua is formatted with [StyLua](https://github.com/JohnnyMorganz/StyLua): run `stylua .`, which reads `.stylua.toml`.
 

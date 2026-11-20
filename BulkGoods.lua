@@ -7,8 +7,9 @@
 -- It writes nothing into the window or the vendor buttons. Secure code that reads a field an addon wrote runs tainted
 -- from there on; the window's key handler then records the keys held in a table that only tainted code can write
 -- again, and a later close of any quantity window runs the release of a held key (moving, Enter) as a forbidden
--- action. So the window keeps Blizzard's own amount, under Blizzard's one-stack ceiling, and Bulk Goods keeps the
--- amount past it, by Blizzard's own typing rules, and shows it in the window.
+-- action. So the window keeps Blizzard's own amount, under Blizzard's one-stack ceiling, and Bulk Goods keeps its
+-- own amount and shows it in the window: the digits typed are the total, even for an item sold several at a time,
+-- which Blizzard's window counts in bundles.
 --
 -- Only stackable items paid for in gold alone, under the price Blizzard asks about (MERCHANT_HIGH_PRICE_COST), get
 -- the higher ceiling. Every other vendor item keeps Blizzard's prompt and confirmations as they are.
@@ -243,10 +244,14 @@ end)
 -- The amount past Blizzard's ceiling
 -------------------------------------------------------------------------------------------------------------------
 
--- The window raised and still open: { prompt, owner = vendor button, plan, most, step = the bundle, amount, typing }.
--- Its amount follows Blizzard's rules for each key and arrow, Bulk Goods's ceiling in place of Blizzard's: digits
--- count bundles ("8 Stacks, 40 Total"), and a leading 0 counts as a 1. Blizzard's own amount moves the same way
--- until its ceiling stops it, so it is never above this one.
+-- The window raised and still open: { prompt, owner = vendor button, plan, most, step = the bundle, amount = Bulk
+-- Goods's own, shown = what the window shows, typed = the number typed so far, nil before the first digit }.
+--
+-- The digits typed are the total, rounded up to whole bundles, and a digit that would take it past the ceiling is
+-- dropped. Blizzard's own amount reads the same digits as bundles ("8 Stacks, 40 Total") and a leading 0 as a 1, but
+-- stays under its one-stack ceiling, which drops all but its first digit or two: for 30 Mild Spices (five at a time)
+-- it holds three fives. Its Okay buys it, so the window shows whichever is larger: only a number small enough for
+-- Blizzard's window to take whole as bundles (3 alone is three fives) shows and buys Blizzard's total.
 local raised
 
 -- `raised` while that window is still the one shown: Blizzard opens it again for bags and banks.
@@ -257,25 +262,32 @@ local function Raised()
 	end
 end
 
--- Shows the amount, after Blizzard's handler has shown its own. Blizzard's Okay buys Blizzard's amount, so the
--- amount shown is never below it.
+-- Shows the amount, after Blizzard's handler has shown its own.
 local function Put(r)
 	local prompt = r.prompt
-	if (prompt.split or 0) > r.amount then
-		r.amount = prompt.split
-	end
+	r.shown = math.max(r.amount, prompt.split or 0)
 	if prompt.isMultiStack then
-		prompt.StackSplitText:SetText(STACKS:format(r.amount / r.step))
-		prompt.StackItemCountText:SetText(TOTAL_STACKS:format(r.amount))
+		prompt.StackSplitText:SetText(STACKS:format(r.shown / r.step))
+		prompt.StackItemCountText:SetText(TOTAL_STACKS:format(r.shown))
 	else
-		prompt.StackSplitText:SetText(r.amount)
+		prompt.StackSplitText:SetText(r.shown)
 	end
-	prompt.LeftButton:SetEnabled(r.amount > r.step)
-	prompt.RightButton:SetEnabled(r.amount < r.most)
+	prompt.LeftButton:SetEnabled(r.shown > r.step)
+	prompt.RightButton:SetEnabled(r.shown < r.most)
 end
 
+-- Whole bundles for `typed`, one at least.
+local function Whole(r, typed)
+	return math.max(math.ceil(typed / r.step), 1) * r.step
+end
+
+-- The arrows step a bundle from the amount shown; digits typed after them go on from there, as in Blizzard's
+-- window, and before any digit the first one starts the total.
 local function Step(r, bundles)
-	r.amount = math.min(math.max(r.amount + bundles * r.step, r.step), r.most)
+	r.amount = math.min(math.max(r.shown + bundles * r.step, r.step), r.most)
+	if r.typed then
+		r.typed = r.amount
+	end
 	Put(r)
 end
 
@@ -284,17 +296,10 @@ local function OnChar(_, char)
 	if not r or not char:match("^%d$") then
 		return
 	end
-	local digit = tonumber(char)
-	if not (r.prompt.isMultiStack and r.most < r.step * digit) then
-		if r.typing == 0 then
-			r.typing, r.amount = r.step, 0
-		end
-		local amount = r.amount * 10 + digit * r.step
-		if amount == r.amount then
-			r.amount = math.max(r.amount, r.step)
-		elseif amount <= r.most then
-			r.amount = amount
-		end
+	local typed = (r.typed or 0) * 10 + tonumber(char)
+	local amount = Whole(r, typed)
+	if amount <= r.most then
+		r.typed, r.amount = typed, amount
 	end
 	Put(r)
 end
@@ -304,12 +309,9 @@ local function OnKeyDown(_, key)
 	if not r then
 		return
 	elseif key == "BACKSPACE" or key == "DELETE" then
-		if r.typing ~= 0 and r.amount ~= r.step then
-			-- The last digit off, in whole bundles.
-			r.amount = math.floor(r.amount / r.step / 10) * r.step
-			if r.amount <= r.step then
-				r.amount, r.typing = r.step, 0
-			end
+		if r.typed then
+			r.typed = r.typed >= 10 and math.floor(r.typed / 10) or nil
+			r.amount = r.typed and Whole(r, r.typed) or r.step
 		end
 		Put(r)
 	elseif key == "LEFT" or key == "DOWN" then
@@ -355,8 +357,9 @@ local function AfterSplitStack(button, split)
 		return
 	end
 	raised = nil
-	if r.amount > split and button:GetID() == r.plan.index then
-		Buy(r.plan, math.min(r.amount, r.plan.most), split)
+	local total = math.min(math.max(r.amount, split), r.plan.most)
+	if total > split and button:GetID() == r.plan.index then
+		Buy(r.plan, total, split)
 	end
 end
 
@@ -394,7 +397,6 @@ hooksecurefunc("MerchantItemButton_BuyMultipleStacks", function(button)
 		most = plan.most,
 		step = plan.bundle,
 		amount = plan.bundle,
-		typing = 0,
 	}
 	Put(raised)
 end)

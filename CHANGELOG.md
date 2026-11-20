@@ -6,10 +6,9 @@
   (walking away from the vendor, say) was blocked with "Bulk Goods tried to call the protected function
   RunBinding()", and a held movement key could keep your character moving. Bulk Goods now writes nothing into
   Blizzard's window.
-- Typing works as in Blizzard's window again: for an item sold several at a time the number counts bundles ("16
-  Stacks, 80 Total"), and a leading 0 counts as a 1. The window shows the total that will be bought. The v1.0.1 way
-  needed Bulk Goods to write into Blizzard's window, which caused the blocked action.
-- Blizzard's window now buys its own part, up to one stack, as soon as you click Okay. Bulk Goods buys the rest.
+- Blizzard's window now buys its own part, up to one stack, as soon as you click Okay, and Bulk Goods buys the rest.
+- The number you type is still how many you get, except a number small enough for Blizzard's window to take whole
+  as bundles: 3 alone for an item sold five at a time is three fives, as in Blizzard's window. The window shows it.
 
 ## v1.0.1
 

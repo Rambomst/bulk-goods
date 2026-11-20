@@ -13,9 +13,10 @@ trips through it. **Bulk Goods** lifts that limit in the same window. Shift-clic
 arrive.
 
 - **As many as you can buy:** the window goes up to what your gold, your bag space and the vendor's stock allow.
-- **Typed as in Blizzard's window:** the digits, the arrows and Backspace work as they do there, past the one-stack
-  limit. For an item the vendor sells several at a time (Mild Spices come five for a price), the number counts those
-  bundles, and the window shows the total ("16 Stacks, 80 Total").
+- **The number you type is how many you get:** for an item the vendor sells several at a time (Mild Spices come
+  five for a price), it is rounded up to whole bundles. Blizzard's window counts the bundles instead, so typing 80
+  there would buy 400. One exception: a number small enough for Blizzard's window to take whole as bundles (3
+  alone is three fives) still buys that, and the window shows it.
 - **A stack at a time:** the vendor sells at most one stack per purchase, so the rest arrives in more purchases, each
   once the last one is in your bags.
 - **A chat line if it stops early:** full bags, not enough gold, the item sold out or the vendor window closed, with

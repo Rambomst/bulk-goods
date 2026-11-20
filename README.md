@@ -7,11 +7,11 @@ Shift-clicking a vendor item opens Blizzard's quantity window, but it stops at o
 trips through it. Bulk Goods lifts that limit in the same window: Shift-click, type 30, Okay, and all 30 arrive.
 
 - **As many as you can buy:** the window goes up to what your gold, your bag space and the vendor's stock allow.
-- **The number you type is how many you get:** for an item the vendor sells several at a time (Mild Spices come
-  five for a price), it is rounded up to whole bundles. Blizzard's window counts the bundles instead, so typing 80
-  there would buy 400.
-- **A stack at a time:** the vendor still sells one stack per purchase, so Bulk Goods buys the stacks one after
-  another, each once the last one is in your bags.
+- **Typed as in Blizzard's window:** the digits, the arrows and Backspace work as they do there, past the one-stack
+  limit. For an item the vendor sells several at a time (Mild Spices come five for a price), the number counts those
+  bundles, and the window shows the total ("16 Stacks, 80 Total").
+- **A stack at a time:** the vendor sells at most one stack per purchase, so the rest arrives in more purchases, each
+  once the last one is in your bags.
 - **A chat line if it stops early:** full bags, not enough gold, the item sold out or the vendor window closed, with
   how many arrived.
 - **One stack or less** is bought by Blizzard's window, as always.
@@ -46,34 +46,38 @@ Everything the addon runs is in `BulkGoods.lua`:
 - **How much can be bought** (`Plan`, `BagRoom`): the most the gold, the bags and the vendor's stock allow. Bag room
   counts the free slots of every bag that takes the item, plus the room left on its partial stacks. Items sold
   several at a time (five for a price) are bought in whole bundles.
-- **The amount typed into a raised window** (`OnChar`, `OnKeyDown`, `OnArrowClick`): the digits typed are the total,
-  rounded up to whole bundles, and Backspace and the arrows work on it.
-- **Buying, one stack per call** (`Buy`, `Send`, `Check`, `Finish`): a queue of purchases. The next
-  `BuyMerchantItem` call goes once the item count in the bags has risen by the last one. The buying stops on the
+- **The amount past Blizzard's ceiling** (`OnChar`, `OnKeyDown`, `OnLeftClick`, `OnRightClick`, `Put`): Bulk
+  Goods's own amount, moved by Blizzard's rules for each key and arrow up to its own ceiling, and shown in the window.
+- **Buying, one stack per call** (`Buy`, `Next`, `Send`, `Check`, `Finish`): a queue of purchases, each starting
+  with the call Blizzard's window made itself. The next `BuyMerchantItem` call goes once the item count in the bags
+  has risen by the last one. The buying stops on the
   vendor's errors (`UI_ERROR_MESSAGE`), when the vendor window closes, when the vendor's list moves under it (limited
   stock selling out), or after 5 seconds without an answer.
-- **Blizzard's window with a higher ceiling**: a `hooksecurefunc` hook on `MerchantItemButton_BuyMultipleStacks`.
+- **Blizzard's window with a higher ceiling** (`AfterSplitStack`): `hooksecurefunc` hooks on
+  `MerchantItemButton_BuyMultipleStacks` and on each vendor button's `SplitStack`.
 
 The rules it is built on:
 
 - Blizzard opens `StackSplitFrame` with `GetMerchantItemMaxStack` as its ceiling, because one `BuyMerchantItem` call
   never buys more than that. Nothing else in the window limits the amount.
-- So Bulk Goods raises the open window's `maxStack` in place. Opening the window again from addon code would write
-  its `owner` field, and every later use of the window (bags, bank, vendor) would run tainted for the session.
-- The window's Okay hands the amount to the vendor button's `SplitStack`. Bulk Goods wraps that function on a button
-  the first time it raises a window on it; one stack or less still goes to Blizzard's.
-- Blizzard's window reads the digits typed for an item sold several at a time as a count of bundles ("8 Stacks, 40
-  Total"), and a leading 0 as a 1. Under its own one-stack ceiling that costs a stack at most. The first time Bulk
-  Goods raises a window, it hooks the window's `OnChar` and `OnKeyDown` and its arrows' `OnClick` with `HookScript`,
-  so Blizzard's handlers still run first and untouched, and while a window is raised it puts the amount right after
-  each key.
-- With the gamepad interface on, the window's own handlers run gamepad code, which a raised window would taint, and
-  the next protected gamepad call would be blocked. So Bulk Goods leaves the window alone there.
-- One known leftover: after Enter, Backspace or an arrow key in a raised window, Blizzard's record of held keys is
-  left written by tainted code, so the next close of any quantity window runs tainted. With Enter, which closes the
-  window before the key comes up, that close also runs Enter's release binding. None of it does harm with mouse and
-  keyboard. With the gamepad interface turned on later in the same session, that close would run gamepad code
-  tainted; `/reload` clears it.
+- Bulk Goods writes no field of the window or of the vendor buttons. Secure code that reads a field an addon wrote
+  runs tainted from there on. The window's `OnKeyDown` rewrites its table of held keys (`down`) on every key, so once
+  a tainted run writes it, it stays tainted for the session, and the next close of any quantity window with a key in
+  it runs that key's release through `RunBinding`, which the client refuses to tainted code (ADDON_ACTION_FORBIDDEN):
+  a held movement key is never released. 1.0.0 and 1.0.1 raised `maxStack`, wrote `split` and wrapped the button's
+  `SplitStack`, and hit this in game.
+- So the window keeps Blizzard's own amount (`split`, one stack at most). The first time Bulk Goods raises a window,
+  it hooks the window's `OnChar`, `OnKeyDown` and `OnHide` and its arrows' `OnClick` with `HookScript`, so
+  Blizzard's handlers still run first and untouched. Its own amount follows Blizzard's rules with its own ceiling,
+  and it shows it with `SetText` and `SetEnabled` on the window's own text and arrows, which write no Lua field.
+- Blizzard's Okay closes the window and hands Blizzard's own amount to the vendor button's `SplitStack`, which buys
+  it at once. A `hooksecurefunc` post-hook on that `SplitStack` queues the rest. Blizzard's amount moves by the same
+  rules until its ceiling stops it, so it is never above the amount shown; the window shows Blizzard's if it ever
+  is, so what is shown is what is bought.
+- The digits count bundles for an item sold several at a time, and a leading 0 counts as a 1, as in Blizzard's
+  window: Blizzard's own amount, which its Okay buys, follows those rules, so Bulk Goods's amount has to as well.
+- With the gamepad interface on, the window's D-pad calls Blizzard's arrow functions directly, past these hooks, so
+  Bulk Goods leaves the window alone there.
 
 Lua is formatted with [StyLua](https://github.com/JohnnyMorganz/StyLua): run `stylua .`, which reads `.stylua.toml`.
 
@@ -94,6 +98,9 @@ client data it runs against, into `~/.cache/bulkgoods-sim`.
 - `FOREVER_SIM` points the tests at another forever_sim folder, such as the one in a forever-core checkout
   (`.agents/skills/wow-forever-addon/tooling/forever_sim`).
 - `BULKGOODS_ADDON_DIR` runs the scenarios against another copy of the addon, such as an installed one.
+
+Every scenario also checks that Bulk Goods wrote no field of the window or the vendor buttons
+(`issecurevariable`), and that every key release the window ran (`RunBinding`) ran from secure code.
 
 CI runs the tests on every push and pull request.
 

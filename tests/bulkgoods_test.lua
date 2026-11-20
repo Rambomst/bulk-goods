@@ -53,6 +53,9 @@ end
 local Session = {}
 Session.__index = Session
 
+-- The key bindings the scenarios use.
+local BINDINGS = { W = "MOVEFORWARD", ENTER = "OPENCHAT" }
+
 -- The sim's stand-in for the bags' token tracker (scenario.lua ensureBagTracker) lacks ShouldShow, so the bags
 -- Blizzard opens with the vendor window fail, and MerchantFrame_OnShow stops before it fills the vendor's items.
 -- A tracker with that method, put there first, keeps the sim's from being made.
@@ -92,8 +95,18 @@ local function open(opts)
 	-- MerchantFrame_OnShow opens every bag before it fills the vendor's items. Bag windows are not under test.
 	sim.G.OpenAllBags = function() end
 	sim.G.CloseAllBags = function() end
-	-- A client native the sim does not define: the prompt runs a key's binding when the key comes up.
-	sim.G.RunBinding = function() end
+	-- A client native the sim does not define: the prompt runs a key's binding, and the client refuses it to tainted
+	-- code (ADDON_ACTION_FORBIDDEN), so a release that should stop the character moving never arrives.
+	s.bindings = {}
+	sim.G.RunBinding = function(action, how)
+		s.bindings[#s.bindings + 1] = {
+			text = tostring(action) .. ":" .. tostring(how),
+			secure = sim.G.issecure(),
+		}
+	end
+	sim.G.GetBindingAction = function(key)
+		return BINDINGS[key] or ""
+	end
 	sim:openMerchant()
 	vendor:tick(0.1)
 	return s
@@ -138,8 +151,42 @@ function Session:key(key)
 	end
 end
 
+-- Presses a key and keeps it held.
+function Session:hold(key)
+	local frame = self:prompt()
+	self.sim:input(function()
+		self.sim.widgets.dispatch(frame, "OnKeyDown", key)
+	end)
+end
+
 function Session:okay()
 	self.sim:click(self:prompt().OkayButton)
+end
+
+-- The amount the window shows: the total for an item sold several at a time.
+function Session:shown()
+	local p = self:prompt()
+	if p.isMultiStack then
+		return tonumber(p.StackItemCountText:GetText():match("%d+"))
+	end
+	return tonumber(p.StackSplitText:GetText())
+end
+
+-- Clears what was typed, then types `text`.
+function Session:retype(text)
+	for _ = 1, 8 do
+		self:key("BACKSPACE")
+	end
+	self:type(text)
+end
+
+-- The bindings run so far, as "MOVEFORWARD:up", each marked if it ran from tainted code.
+function Session:ran()
+	local out = {}
+	for _, b in ipairs(self.bindings) do
+		out[#out + 1] = b.text .. (b.secure and "" or " (tainted)")
+	end
+	return table.concat(out, ",")
 end
 
 -- Opens the prompt on item i, types the amount and clicks Okay, then lets the purchases land.
@@ -197,12 +244,48 @@ local function ok(value, what)
 	end
 end
 
+-- Fields of Blizzard's window and vendor buttons that its secure code reads. A field an addon wrote taints whatever
+-- secure code reads it.
+local PROMPT_FIELDS = { "down", "maxStack", "split", "typing", "minSplit", "owner", "isMultiStack" }
+local BUTTON_FIELDS = { "SplitStack", "hasStackSplit" }
+
 local function clean(s)
 	local errors = s:addonErrors()
 	if #errors > 0 then
 		error("Bulk Goods caused errors:\n" .. Sim.describe(errors), 2)
 	end
 	eq(#s.vendor.oversized, 0, "calls that asked for more than a stack")
+	for _, b in ipairs(s.bindings or {}) do
+		if not b.secure then
+			error("RunBinding(" .. b.text .. ") ran from tainted code; the client refuses it", 2)
+		end
+	end
+	local prompt = s:prompt()
+	for _, field in ipairs(PROMPT_FIELDS) do
+		local secure, by = s.G.issecurevariable(prompt, field)
+		if not secure then
+			error("StackSplitFrame." .. field .. " was written by " .. tostring(by), 2)
+		end
+	end
+	for i = 1, 12 do
+		local button = s:button(i)
+		for _, field in ipairs(BUTTON_FIELDS) do
+			local secure, by = s.G.issecurevariable(button, field)
+			if not secure then
+				error("MerchantItem" .. i .. "ItemButton." .. field .. " was written by " .. tostring(by), 2)
+			end
+		end
+	end
+end
+
+-- The highest amount the raised window takes: typing it shows n with the up arrow off, and typing `over` (n + 1 by
+-- default) drops its last digit, leaving `shown`. For bundles, `typed` and `over` are counts of bundles.
+local function expectCeiling(s, n, typed, over, shown)
+	s:retype(typed or tostring(n))
+	eq(s:shown(), n, "the ceiling typed")
+	ok(not s:prompt().RightButton:IsEnabled(), "up arrow off at the ceiling")
+	s:retype(over or tostring(n + 1))
+	eq(s:shown(), shown or math.floor(n / 10), "a digit past the ceiling dropped")
 end
 
 ---------------------------------------------------------------------------------------------------------------
@@ -223,26 +306,30 @@ test("Shift-click opens Blizzard's prompt with more than a stack", function()
 	s:shiftClick(SPICES)
 	local p = s:prompt()
 	ok(p:IsShown(), "prompt shown")
-	-- 16 empty slots of 20; 10 gold covers 10,000.
-	eq(p.maxStack, 320, "ceiling")
-	eq(p.split, 1, "starts at")
-	eq(p.isMultiStack, false, "single-item layout")
-	-- Still Blizzard's prompt: its owner, anchor and closing rules are untouched.
+	-- Still Blizzard's prompt: its owner and its own one-stack amount are untouched.
 	eq(p.owner, s:button(SPICES), "owner")
+	eq(p.maxStack, 20, "Blizzard's own ceiling")
+	eq(s:shown(), 1, "starts at")
+	eq(p.isMultiStack, false, "single-item layout")
+	ok(p.RightButton:IsEnabled(), "up arrow")
+	-- 16 empty slots of 20; 10 gold covers 10,000.
+	expectCeiling(s, 320)
 	clean(s)
 end)
 
-test("30 Hot Spices: 20, then 10 once the 20 arrived", function()
+-- Blizzard's own amount stops at its ceiling: 30 typed leaves it at 3, which its Okay buys at once.
+test("30 Hot Spices: Blizzard's part at once, then the rest a stack per call", function()
 	local s = open({ spec = { latency = 0.3 } })
 	s:shiftClick(SPICES)
 	s:type("30")
-	eq(s:prompt().split, 30, "typed amount")
+	eq(s:shown(), 30, "typed amount")
+	eq(s:prompt().split, 3, "Blizzard's own amount")
 	s:okay()
-	eq(s.vendor:quantities(), "20", "first call goes at once")
+	eq(s.vendor:quantities(), "3", "Blizzard's call goes at once")
 	s.vendor:tick(0.1)
-	eq(s.vendor:quantities(), "20", "second call waits for the first to land")
+	eq(s.vendor:quantities(), "3", "the next call waits for it to land")
 	s.vendor:tick(1)
-	eq(s.vendor:quantities(), "20,10", "calls")
+	eq(s.vendor:quantities(), "3,20,7", "calls")
 	eq(s.vendor:count(2678), 30, "in the bags")
 	eq(s.sim.world.player.money, 10 * GOLD - 300, "money")
 	eq(s:chat(), "", "chat")
@@ -261,7 +348,7 @@ end)
 test("a big order goes a stack per call", function()
 	local s = open()
 	s:buy(SPICES, 95)
-	eq(s.vendor:quantities(), "20,20,20,20,15", "calls")
+	eq(s.vendor:quantities(), "9,20,20,20,20,6", "calls")
 	eq(s.vendor:count(2678), 95, "in the bags")
 	clean(s)
 end)
@@ -272,7 +359,7 @@ test("the ceiling is what the bags hold, partial stacks included", function()
 	local s = open({ spec = { bags = b } })
 	s:shiftClick(SPICES)
 	-- Two empty slots of 20, and 15 more on the stack of 5.
-	eq(s:prompt().maxStack, 55, "ceiling")
+	expectCeiling(s, 55)
 	clean(s)
 end)
 
@@ -281,21 +368,21 @@ test("a quiver-type bag does not count for other items", function()
 	b[1] = { size = 10, family = 1 }
 	local s = open({ spec = { bags = b } })
 	s:shiftClick(SPICES)
-	eq(s:prompt().maxStack, 40, "ceiling")
+	expectCeiling(s, 40)
 	clean(s)
 end)
 
 test("the ceiling is what the money covers", function()
 	local s = open({ spec = { money = 250 } })
 	s:shiftClick(SPICES)
-	eq(s:prompt().maxStack, 25, "ceiling")
+	expectCeiling(s, 25)
 	clean(s)
 end)
 
 test("the ceiling is the vendor's stock", function()
 	local s = open()
 	s:shiftClick(LIMITED)
-	eq(s:prompt().maxStack, 25, "ceiling")
+	expectCeiling(s, 25)
 	clean(s)
 end)
 
@@ -317,10 +404,12 @@ test("items Blizzard confirms keep Blizzard's prompt", function()
 	local s = open({ spec = { money = 5000 * GOLD } })
 	s:shiftClick(PRICEY)
 	eq(s:prompt().owner, s:button(PRICEY), "150 gold and up: owner")
-	eq(s:prompt().maxStack, 20, "150 gold and up: ceiling")
+	s:type("30")
+	eq(s:shown(), 3, "150 gold and up: Blizzard's own amount")
 	s:shiftClick(TOKEN)
 	eq(s:prompt().owner, s:button(TOKEN), "currency-priced: owner")
-	eq(s:prompt().maxStack, 20, "currency-priced: ceiling")
+	s:type("30")
+	eq(s:shown(), 3, "currency-priced: Blizzard's own amount")
 	clean(s)
 end)
 
@@ -338,46 +427,28 @@ test("an item sold five at a time is bought in whole fives", function()
 	local p = s:prompt()
 	eq(p.minSplit, 5, "step")
 	eq(p.isMultiStack, true, "bundle layout")
-	eq(p.maxStack % 5, 0, "ceiling in whole bundles")
-	s:type("35")
-	eq(p.split, 35, "typed amount")
+	s:type("7")
+	eq(p.StackSplitText:GetText(), s.G.STACKS:format(7), "fives shown")
 	eq(p.StackItemCountText:GetText(), "35 Total", "total shown")
 	s:okay()
 	s.vendor:tick(2)
-	eq(s.vendor:quantities(), "20,15", "calls")
+	eq(s.vendor:quantities(), "5,20,10", "calls")
 	eq(s.vendor:count(90001), 35, "in the bags")
 	eq(s.sim.world.player.money, 10 * GOLD - 350, "money")
 	clean(s)
 end)
 
--- Blizzard's prompt reads the digits as a number of fives: 80 typed was 400 with room for 400, and 40 without (its
--- 0 dropped, "8 Stacks, 40 Total").
-test("80 typed for an item sold five at a time buys 80", function()
-	for _, free in ipairs({ 22, 16 }) do
-		local s = open({ spec = { bags = bags(free) } })
-		s:shiftClick(BUNDLE)
-		local p = s:prompt()
-		eq(p.maxStack, free * 20, "ceiling")
-		s:type("80")
-		eq(p.split, 80, "typed amount")
-		eq(p.StackItemCountText:GetText(), "80 Total", "total shown")
-		s:okay()
-		s.vendor:tick(2)
-		eq(s.vendor:quantities(), "20,20,20,20", "calls")
-		eq(s.vendor:count(90001), 80, "in the bags")
-		clean(s)
-	end
-end)
-
-test("a total between whole fives is rounded up to the next five", function()
+-- As in Blizzard's window, the digits typed count fives, and the window shows the total that buys.
+test("for an item sold five at a time the digits count fives", function()
 	local s = open()
 	s:shiftClick(BUNDLE)
 	local p = s:prompt()
-	s:type("8")
-	eq(p.split, 10, "8 typed")
-	s:type("3")
-	eq(p.split, 85, "83 typed")
-	eq(p.StackItemCountText:GetText(), "85 Total", "total shown")
+	s:type("16")
+	eq(p.StackItemCountText:GetText(), "80 Total", "16 fives")
+	s:okay()
+	s.vendor:tick(2)
+	eq(s.vendor:quantities(), "5,20,20,20,15", "calls")
+	eq(s.vendor:count(90001), 80, "in the bags")
 	clean(s)
 end)
 
@@ -385,33 +456,37 @@ test("a digit that takes the total past the ceiling is dropped", function()
 	local s = open({ spec = { bags = bags(3) } })
 	s:shiftClick(BUNDLE)
 	local p = s:prompt()
-	eq(p.maxStack, 60, "ceiling")
-	s:type("80")
-	eq(p.split, 10, "80 typed")
+	-- 60 fits: twelve fives.
+	s:type("13")
+	eq(s:shown(), 5, "13 typed: the 3 dropped")
 	ok(p.RightButton:IsEnabled(), "up arrow")
-	s:key("BACKSPACE")
-	s:type("58")
-	eq(p.split, 60, "58 typed")
+	s:type("2")
+	eq(s:shown(), 60, "12 typed")
 	ok(not p.RightButton:IsEnabled(), "up arrow at the ceiling")
 	clean(s)
 end)
 
-test("Backspace takes the last digit typed off the total", function()
+test("Backspace takes the last digit typed off", function()
 	local s = open()
-	s:shiftClick(BUNDLE)
+	s:shiftClick(SPICES)
 	local p = s:prompt()
 	s:type("123")
-	eq(p.split, 125, "123 typed")
+	eq(s:shown(), 123, "123 typed")
 	s:key("BACKSPACE")
-	eq(p.split, 15, "12 left")
-	eq(p.StackItemCountText:GetText(), "15 Total", "total shown")
+	eq(s:shown(), 12, "12 left")
 	s:key("BACKSPACE")
-	eq(p.split, 5, "1 left")
+	eq(s:shown(), 1, "1 left")
 	s:key("BACKSPACE")
-	eq(p.split, 5, "nothing left")
-	ok(not p.LeftButton:IsEnabled(), "down arrow at one five")
+	eq(s:shown(), 1, "nothing left")
+	ok(not p.LeftButton:IsEnabled(), "down arrow at one")
 	s:type("4")
-	eq(p.split, 5, "typing starts again")
+	eq(s:shown(), 4, "typing starts again")
+	-- In fives, a whole five at a time.
+	s:shiftClick(BUNDLE)
+	s:type("12")
+	eq(s:shown(), 60, "12 fives typed")
+	s:key("BACKSPACE")
+	eq(s:shown(), 5, "1 five left")
 	clean(s)
 end)
 
@@ -420,30 +495,34 @@ test("the arrows step a five, and digits typed after them go on from there", fun
 	s:shiftClick(BUNDLE)
 	local p = s:prompt()
 	s.sim:click(p.RightButton)
-	eq(p.split, 10, "up arrow")
-	-- Before any digit, as in Blizzard's prompt, the first one starts the total.
+	eq(s:shown(), 10, "up arrow")
+	-- Before any digit, as in Blizzard's prompt, the first one starts the amount.
 	s:type("2")
-	eq(p.split, 5, "2 typed")
+	eq(s:shown(), 10, "2 typed")
 	s.sim:click(p.RightButton)
-	eq(p.split, 10, "up arrow again")
+	eq(s:shown(), 15, "up arrow again")
 	s:type("0")
-	eq(p.split, 100, "0 typed after it")
+	eq(s:shown(), 150, "0 typed after it")
 	s:key("LEFT")
-	eq(p.split, 95, "left arrow key")
+	eq(s:shown(), 145, "left arrow key")
 	s:key("BACKSPACE")
-	eq(p.split, 10, "Backspace after it")
+	eq(s:shown(), 10, "Backspace after it")
 	s:okay()
 	s.vendor:tick(1)
-	eq(s.vendor:quantities(), "10", "calls")
+	eq(s.vendor:quantities(), "5,5", "calls")
+	eq(s.vendor:count(90001), 10, "in the bags")
 	clean(s)
 end)
 
--- Blizzard's prompt turns a leading 0 into a 1: 050 is 150.
-test("a leading 0 typed is not a 1", function()
+-- Blizzard's own amount turns a leading 0 into a 1 (050 is 150) and its Okay buys that, so the window shows it.
+test("a leading 0 counts as a 1, as in Blizzard's window", function()
 	local s = open()
 	s:shiftClick(SPICES)
 	s:type("050")
-	eq(s:prompt().split, 50, "050 typed")
+	eq(s:shown(), 150, "050 typed")
+	s:okay()
+	s.vendor:tick(3)
+	eq(s.vendor:count(2678), 150, "in the bags")
 	clean(s)
 end)
 
@@ -463,16 +542,16 @@ test("the ceiling for an item sold five at a time is every five the money covers
 	list[BUNDLE].price = 11
 	local s = open({ spec = { items = list, money = 66 } })
 	s:shiftClick(BUNDLE)
-	eq(s:prompt().maxStack, 30, "ceiling")
+	expectCeiling(s, 30, "6", "7", 5)
 	clean(s)
 end)
 
 test("a full bag mid-order stops the rest and says how far it got", function()
 	local s = open({ spec = { failFrom = 2 } })
 	s:buy(SPICES, 50)
-	eq(s.vendor:quantities(), "20,20", "calls")
-	eq(s.vendor:count(2678), 20, "in the bags")
-	eq(s:chat(), "Bulk Goods: [Hot Spices]: bought 20 of 50. Inventory is full.", "chat")
+	eq(s.vendor:quantities(), "5,20", "calls")
+	eq(s.vendor:count(2678), 5, "in the bags")
+	eq(s:chat(), "Bulk Goods: [Hot Spices]: bought 5 of 50. Inventory is full.", "chat")
 	clean(s)
 end)
 
@@ -483,9 +562,9 @@ test("closing the vendor mid-order lets the call out land, then stops", function
 	s:okay()
 	s.sim:closeMerchant()
 	s.vendor:tick(2)
-	eq(s.vendor:quantities(), "20", "calls")
-	eq(s.vendor:count(2678), 20, "in the bags")
-	eq(s:chat(), "Bulk Goods: [Hot Spices]: bought 20 of 50. The vendor window closed.", "chat")
+	eq(s.vendor:quantities(), "5", "calls")
+	eq(s.vendor:count(2678), 5, "in the bags")
+	eq(s:chat(), "Bulk Goods: [Hot Spices]: bought 5 of 50. The vendor window closed.", "chat")
 	clean(s)
 end)
 
@@ -494,7 +573,7 @@ test("no answer from the vendor gives up after five seconds", function()
 	s:buy(SPICES, 30, 4)
 	eq(s:chat(), "", "chat before five seconds")
 	s.vendor:tick(2)
-	eq(s.vendor:quantities(), "20", "calls")
+	eq(s.vendor:quantities(), "3", "calls")
 	eq(s:chat(), "Bulk Goods: [Hot Spices]: bought 0 of 30. The vendor did not answer.", "chat")
 	clean(s)
 end)
@@ -508,8 +587,8 @@ test("the vendor's list moving stops the rest", function()
 	-- sent still lands; nothing more goes to what is now another item.
 	table.remove(s.vendor.items, 1)
 	s.vendor:tick(2)
-	eq(s.vendor:quantities(), "20", "calls")
-	eq(s:chat(), "Bulk Goods: [Hot Spices]: bought 20 of 50. The vendor's list changed.", "chat")
+	eq(s.vendor:quantities(), "5", "calls")
+	eq(s:chat(), "Bulk Goods: [Hot Spices]: bought 5 of 50. The vendor's list changed.", "chat")
 	clean(s)
 end)
 
@@ -542,16 +621,17 @@ test("Cancel buys nothing", function()
 	clean(s)
 end)
 
+-- Blizzard's own call for each order goes when its Okay is clicked; Bulk Goods's calls go one at a time.
 test("the next purchase waits for the one before", function()
-	local s = open()
+	local s = open({ spec = { latency = 0.3 } })
 	s:shiftClick(SPICES)
 	s:type("30")
 	s:okay()
 	s:shiftClick(LIMITED)
 	s:type("22")
 	s:okay()
-	s.vendor:tick(2)
-	eq(s.vendor:quantities(), "20,10,20,2", "calls")
+	s.vendor:tick(3)
+	eq(s.vendor:quantities(), "3,2,20,7,20", "calls")
 	eq(s.vendor:count(2678), 30, "spices")
 	eq(s.vendor:count(90004), 22, "limited")
 	clean(s)
@@ -603,33 +683,42 @@ test("gamepad interface: Blizzard's prompt stays as it is", function()
 	s.sim:expectNoGamepadTaint("BulkGoods")
 end)
 
--- Enter confirms through the prompt's OnKeyDown, which goes on to mark Enter as held after the purchase, in the
--- execution the raised ceiling tainted; the frame is hidden by then, so the key-up never clears it, and the next
--- OnHide runs Enter's binding "up" from that mark (Blizzard's own design for keys held while the prompt closes).
-test("a bulk buy confirmed with Enter blocks nothing when the prompt is used again", function()
+-- The in-game bug of 2026-11-19 (Bulk Goods 1.0.1): a key the raised window handled ran Blizzard's key handler
+-- tainted, which wrote its table of held keys from then on; closing the vendor later with a key held ran that key's
+-- release through it, and the client refused it (ADDON_ACTION_FORBIDDEN: RunBinding), so a held W kept walking.
+for _, how in ipairs({ "ENTER", "BACKSPACE", "DELETE", "LEFT", "RIGHT", "UP", "DOWN", "digits", "arrows" }) do
+	test("after " .. how .. " in a raised window, keys held at a close are still released", function()
+		local s = open()
+		s:shiftClick(SPICES)
+		s:type("30")
+		if how == "arrows" then
+			s.sim:click(s:prompt().RightButton)
+			s.sim:click(s:prompt().LeftButton)
+		elseif how ~= "digits" then
+			s:key(how)
+		end
+		if s:prompt():IsShown() then
+			s:okay()
+		end
+		s.vendor:tick(2)
+		-- Blizzard's own window (a currency-priced item), then the vendor closed while W is held: walking away.
+		s:shiftClick(TOKEN)
+		s:hold("W")
+		s.sim:closeMerchant()
+		ok(s:ran():find("MOVEFORWARD:up", 1, true), "W released: " .. s:ran())
+		clean(s)
+	end)
+end
+
+test("walking away from a raised window with W held releases W", function()
 	local s = open()
-	-- A client native the sim does not define; the client runs the key's binding.
-	local ran = {}
-	s.G.RunBinding = function(action, how)
-		ran[#ran + 1] = tostring(action) .. ":" .. tostring(how)
-	end
-	s.G.GetBindingAction = function(key)
-		return key == "ENTER" and "OPENCHAT" or ""
-	end
 	s:shiftClick(SPICES)
-	s:type("30")
-	s:key("ENTER")
-	s.vendor:tick(2)
-	eq(s.vendor:quantities(), "20,10", "calls")
-	-- Blizzard's own prompt again (a currency-priced item), closed with Cancel.
-	s:shiftClick(TOKEN)
-	ok(s:prompt():IsShown(), "Blizzard's prompt shown")
-	s.sim:click(s:prompt().CancelButton)
-	eq(table.concat(ran, ","), "OPENCHAT:up", "bindings run on close")
-	s.sim:event("PLAYER_TARGET_CHANGED")
-	s.sim:enterCombat()
-	s.sim:event("PLAYER_TARGET_CHANGED")
-	s.sim:leaveCombat()
+	s:type("40")
+	s:key("BACKSPACE")
+	s:hold("W")
+	s.sim:closeMerchant()
+	ok(s:ran():find("MOVEFORWARD:up", 1, true), "W released: " .. s:ran())
+	eq(s.vendor:quantities(), "", "nothing bought")
 	clean(s)
 end)
 

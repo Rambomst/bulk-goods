@@ -1,10 +1,14 @@
 -- Bulk Goods: Shift-click a vendor item and buy more than one stack in Blizzard's own quantity window.
 --
 -- Blizzard opens that window (StackSplitFrame) with at most one stack, because one BuyMerchantItem call never buys
--- more. Bulk Goods raises the window's ceiling to the most the bags, the money and the vendor allow, and buys the
--- amount picked one stack per call, each call once the one before has reached the bags. In a raised window the
--- digits typed are the total wanted, even for an item sold several at a time, which Blizzard's window counts in
--- bundles.
+-- more. Bulk Goods lets the amount in it go up to the most the bags, the money and the vendor allow, and buys what is
+-- past Blizzard's own amount one stack per call, each call once the one before has reached the bags.
+--
+-- It writes nothing into the window or the vendor buttons. Secure code that reads a field an addon wrote runs tainted
+-- from there on; the window's key handler then records the keys held in a table that only tainted code can write
+-- again, and a later close of any quantity window runs the release of a held key (moving, Enter) as a forbidden
+-- action. So the window keeps Blizzard's own amount, under Blizzard's one-stack ceiling, and Bulk Goods keeps the
+-- amount past it, by Blizzard's own typing rules, and shows it in the window.
 --
 -- Only stackable items paid for in gold alone, under the price Blizzard asks about (MERCHANT_HIGH_PRICE_COST), get
 -- the higher ceiling. Every other vendor item keeps Blizzard's prompt and confirmations as they are.
@@ -86,6 +90,7 @@ end
 
 local jobs = {} -- purchases in the order they were asked for; jobs[1] is being bought
 local timer
+local Check
 local events = CreateFrame("Frame")
 
 local STOP_ERRORS = {}
@@ -118,10 +123,23 @@ local function Finish(reason)
 	events:UnregisterAllEvents()
 end
 
-local Send
+local Next
+
+local function Wait(job)
+	if timer then
+		timer:Cancel()
+	end
+	timer = C_Timer.NewTimer(TIMEOUT, function()
+		timer = nil
+		if C_Item.GetItemCount(job.itemID) >= job.target then
+			return Check()
+		end
+		Finish(job.closed or "The vendor did not answer.")
+	end)
+end
 
 -- Runs on every bag change while a call is out: once the bags hold what it bought, the next call goes.
-local function Check()
+function Check()
 	local job = jobs[1]
 	if not job or not job.out or C_Item.GetItemCount(job.itemID) < job.target then
 		return
@@ -137,14 +155,10 @@ local function Check()
 	elseif job.left <= 0 then
 		table.remove(jobs, 1)
 	end
-	if jobs[1] then
-		Send()
-	else
-		Finish()
-	end
+	Next()
 end
 
-function Send()
+local function Send()
 	local job = jobs[1]
 	if not MerchantFrame:IsShown() then
 		return Finish("The vendor window closed.")
@@ -157,32 +171,48 @@ function Send()
 	job.out = amount
 	job.left = job.left - amount
 	job.target = C_Item.GetItemCount(job.itemID) + amount
-	timer = C_Timer.NewTimer(TIMEOUT, function()
-		timer = nil
-		if C_Item.GetItemCount(job.itemID) >= job.target then
-			return Check()
-		end
-		Finish(job.closed or "The vendor did not answer.")
-	end)
+	Wait(job)
 	BuyMerchantItem(job.index, amount)
 end
 
-local function Buy(plan, amount)
+function Next()
+	local job = jobs[1]
+	if not job then
+		return Finish()
+	elseif job.out then
+		-- Blizzard's own call for it went out when its window was confirmed.
+		Wait(job)
+		return Check()
+	end
+	Send()
+end
+
+-- `total` of the plan's item, of which Blizzard's window has just sent `sent` itself.
+local function Buy(plan, total, sent)
+	-- Calls already out for the same item land in the same count.
+	local pending = 0
+	for _, job in ipairs(jobs) do
+		if job.itemID == plan.itemID and job.out then
+			pending = pending + job.out
+		end
+	end
 	jobs[#jobs + 1] = {
 		index = plan.index,
 		link = plan.link,
 		itemID = plan.itemID,
 		perCall = plan.perCall,
-		total = amount,
-		left = amount,
+		total = total,
+		left = total - sent,
 		got = 0,
+		out = sent,
+		target = C_Item.GetItemCount(plan.itemID) + pending + sent,
 	}
 	if #jobs == 1 then
 		events:RegisterEvent("BAG_UPDATE")
 		events:RegisterEvent("BAG_UPDATE_DELAYED")
 		events:RegisterEvent("UI_ERROR_MESSAGE")
 		events:RegisterEvent("MERCHANT_CLOSED")
-		Send()
+		Next()
 	end
 end
 
@@ -210,46 +240,43 @@ events:SetScript("OnEvent", function(_, event, _, message)
 end)
 
 -------------------------------------------------------------------------------------------------------------------
--- The amount typed into a raised prompt
+-- The amount past Blizzard's ceiling
 -------------------------------------------------------------------------------------------------------------------
 
--- Blizzard's prompt reads the digits typed for an item sold five at a time as a number of fives ("8 Stacks, 40
--- Total"), and a leading 0 as a 1. Under its one-stack ceiling that costs a stack at most; under a raised one, 80
--- typed for 80 Mild Spices bought 400. In a raised prompt the digits typed are the total instead, rounded up to whole
--- bundles, and a digit that would take it past the ceiling is dropped, as Blizzard drops it. These post-hooks put the
--- amount right after Blizzard's handlers have run, and write to the prompt only while it is raised.
-
--- The prompt raised and still open: { prompt, owner = vendor button, most, bundle, split = the amount in it, typed =
--- the number typed so far, nil before the first digit }.
+-- The window raised and still open: { prompt, owner = vendor button, plan, most, step = the bundle, amount, typing }.
+-- Its amount follows Blizzard's rules for each key and arrow, Bulk Goods's ceiling in place of Blizzard's: digits
+-- count bundles ("8 Stacks, 40 Total"), and a leading 0 counts as a 1. Blizzard's own amount moves the same way
+-- until its ceiling stops it, so it is never above this one.
 local raised
 
--- `raised` while that prompt is still the one shown: Blizzard opens the prompt again for bags and banks.
+-- `raised` while that window is still the one shown: Blizzard opens it again for bags and banks.
 local function Raised()
 	local r = raised
-	if r and r.prompt:IsShown() and r.prompt.owner == r.owner and r.prompt.maxStack == r.most then
+	if r and not r.closed and r.prompt:IsShown() and r.prompt.owner == r.owner then
 		return r
 	end
 end
 
+-- Shows the amount, after Blizzard's handler has shown its own. Blizzard's Okay buys Blizzard's amount, so the
+-- amount shown is never below it.
 local function Put(r)
 	local prompt = r.prompt
-	prompt.split = r.split
-	prompt:UpdateStackText()
-	prompt.LeftButton:SetEnabled(r.split > r.bundle)
-	prompt.RightButton:SetEnabled(r.split < r.most)
-end
-
--- Whole bundles for `typed`, one at least.
-local function Whole(r, typed)
-	return math.max(math.ceil(typed / r.bundle), 1) * r.bundle
-end
-
--- Digits typed after an arrow go on from the amount it left, as in Blizzard's prompt.
-local function Stepped(r)
-	r.split = r.prompt.split
-	if r.typed then
-		r.typed = r.split
+	if (prompt.split or 0) > r.amount then
+		r.amount = prompt.split
 	end
+	if prompt.isMultiStack then
+		prompt.StackSplitText:SetText(STACKS:format(r.amount / r.step))
+		prompt.StackItemCountText:SetText(TOTAL_STACKS:format(r.amount))
+	else
+		prompt.StackSplitText:SetText(r.amount)
+	end
+	prompt.LeftButton:SetEnabled(r.amount > r.step)
+	prompt.RightButton:SetEnabled(r.amount < r.most)
+end
+
+local function Step(r, bundles)
+	r.amount = math.min(math.max(r.amount + bundles * r.step, r.step), r.most)
+	Put(r)
 end
 
 local function OnChar(_, char)
@@ -257,10 +284,17 @@ local function OnChar(_, char)
 	if not r or not char:match("^%d$") then
 		return
 	end
-	local typed = (r.typed or 0) * 10 + tonumber(char)
-	local split = Whole(r, typed)
-	if split <= r.most then
-		r.typed, r.split = typed, split
+	local digit = tonumber(char)
+	if not (r.prompt.isMultiStack and r.most < r.step * digit) then
+		if r.typing == 0 then
+			r.typing, r.amount = r.step, 0
+		end
+		local amount = r.amount * 10 + digit * r.step
+		if amount == r.amount then
+			r.amount = math.max(r.amount, r.step)
+		elseif amount <= r.most then
+			r.amount = amount
+		end
 	end
 	Put(r)
 end
@@ -270,20 +304,39 @@ local function OnKeyDown(_, key)
 	if not r then
 		return
 	elseif key == "BACKSPACE" or key == "DELETE" then
-		if r.typed then
-			r.typed = r.typed >= 10 and math.floor(r.typed / 10) or nil
-			r.split = r.typed and Whole(r, r.typed) or r.bundle
+		if r.typing ~= 0 and r.amount ~= r.step then
+			-- The last digit off, in whole bundles.
+			r.amount = math.floor(r.amount / r.step / 10) * r.step
+			if r.amount <= r.step then
+				r.amount, r.typing = r.step, 0
+			end
 		end
 		Put(r)
-	elseif key == "LEFT" or key == "DOWN" or key == "RIGHT" or key == "UP" then
-		Stepped(r)
+	elseif key == "LEFT" or key == "DOWN" then
+		Step(r, -1)
+	elseif key == "RIGHT" or key == "UP" then
+		Step(r, 1)
 	end
 end
 
-local function OnArrowClick()
+local function OnLeftClick()
 	local r = Raised()
 	if r then
-		Stepped(r)
+		Step(r, -1)
+	end
+end
+
+local function OnRightClick()
+	local r = Raised()
+	if r then
+		Step(r, 1)
+	end
+end
+
+-- Closed, not forgotten: Blizzard's Okay hides the window before it calls SplitStack.
+local function OnHide()
+	if raised then
+		raised.closed = true
 	end
 end
 
@@ -291,30 +344,25 @@ end
 -- Blizzard's prompt with a higher ceiling
 -------------------------------------------------------------------------------------------------------------------
 
--- Only the prompt's ceiling and the amount typed into it change; Blizzard opened it, owns it and closes it (page
--- turn, vendor closed). Opening it again from here would make every later use of the prompt run tainted, through its
--- owner field.
-local plans = {} -- [vendor button] = the plan of the prompt raised on it
-local blizzardSplitStack = {} -- [vendor button] = Blizzard's SplitStack, kept when Bulk Goods first wraps it
-local hooked -- whether the prompt's typing is hooked, as it is from the first prompt raised
+local hookedButtons = {} -- vendor buttons whose SplitStack is hooked
+local hooked -- whether the window's typing is hooked, as it is from the first window raised
 
--- Where the prompt hands the amount picked: past one stack Bulk Goods buys it, the rest stays Blizzard's.
-local function SplitStack(button, amount)
-	local plan = plans[button]
-	plans[button] = nil
+-- Blizzard's Okay closes the window, then hands its own amount to the vendor button's SplitStack, which buys it.
+-- This runs after that and buys the rest.
+local function AfterSplitStack(button, split)
+	local r = raised
+	if not r or r.owner ~= button then
+		return
+	end
 	raised = nil
-	if plan and amount > plan.perCall and button:GetID() == plan.index then
-		Buy(plan, math.min(amount, plan.most))
-	else
-		blizzardSplitStack[button](button, amount)
+	if r.amount > split and button:GetID() == r.plan.index then
+		Buy(r.plan, math.min(r.amount, r.plan.most), split)
 	end
 end
 
 hooksecurefunc("MerchantItemButton_BuyMultipleStacks", function(button)
-	plans[button] = nil
 	raised = nil
-	-- With the gamepad interface on, the prompt's own handlers run gamepad code that a changed prompt would taint,
-	-- and the next protected gamepad call would be blocked.
+	-- The gamepad interface moves the window's amount by its own paths, which these hooks do not follow.
 	if InputUtil and InputUtil.IsGamepadUIEnabled and InputUtil.IsGamepadUIEnabled() then
 		return
 	end
@@ -324,21 +372,29 @@ hooksecurefunc("MerchantItemButton_BuyMultipleStacks", function(button)
 		return
 	end
 	local plan = Plan(button:GetID())
-	if not plan or plan.most <= prompt.maxStack then
+	if not plan or plan.most <= (prompt.maxStack or 0) then
 		return
 	end
-	if not blizzardSplitStack[button] then
-		blizzardSplitStack[button] = button.SplitStack
-		button.SplitStack = SplitStack
+	if not hookedButtons[button] then
+		hookedButtons[button] = true
+		hooksecurefunc(button, "SplitStack", AfterSplitStack)
 	end
 	if not hooked then
 		hooked = true
 		prompt:HookScript("OnChar", OnChar)
 		prompt:HookScript("OnKeyDown", OnKeyDown)
-		prompt.LeftButton:HookScript("OnClick", OnArrowClick)
-		prompt.RightButton:HookScript("OnClick", OnArrowClick)
+		prompt:HookScript("OnHide", OnHide)
+		prompt.LeftButton:HookScript("OnClick", OnLeftClick)
+		prompt.RightButton:HookScript("OnClick", OnRightClick)
 	end
-	plans[button] = plan
-	prompt.maxStack = plan.most
-	raised = { prompt = prompt, owner = button, most = plan.most, bundle = plan.bundle, split = prompt.split }
+	raised = {
+		prompt = prompt,
+		owner = button,
+		plan = plan,
+		most = plan.most,
+		step = plan.bundle,
+		amount = plan.bundle,
+		typing = 0,
+	}
+	Put(raised)
 end)
